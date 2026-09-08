@@ -1,0 +1,43 @@
+{
+  "_readme": "Copy to config.json and fill in. `python3 engine/setup.py` will do this for you.",
+  "platform": "sleeper",
+  "team_name": "YOUR TEAM NAME",
+  "league_id": "",
+  "user_id": "",
+  "draft_id": "",
+  "scoring": "ppr",
+  "teams": 12,
+  "roster_slots": {
+    "QB": 1,
+    "RB": 2,
+    "WR": 2,
+    "TE": 1,
+    "FLEX": 1,
+    "K": 1,
+    "DEF": 1
+  },
+  "flex_eligible": [
+    "RB",
+    "WR",
+    "TE"
+  ],
+  "bench_slots": 6,
+  "superflex": false,
+  "playoff_week_start": 15,
+  "waiver_budget": 100,
+  "scoring_settings": {
+    "_readme": "Filled automatically from your league. These are standard PPR defaults.",
+    "pass_yd": 0.04,
+    "pass_td": 4.0,
+    "pass_int": -1.0,
+    "pass_2pt": 2.0,
+    "rush_yd": 0.1,
+    "rush_td": 6.0,
+    "rush_2pt": 2.0,
+    "rec": 1.0,
+    "rec_yd": 0.1,
+    "rec_td": 6.0,
+    "rec_2pt": 2.0,
+    "fum_lost": -2.0
+  }
+}

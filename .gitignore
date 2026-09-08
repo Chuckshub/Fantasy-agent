@@ -1,0 +1,29 @@
+# Your league's configuration - copy config.example.json and fill it in.
+# Never commit this: it identifies your league and, on some platforms, holds
+# session cookies.
+config.json
+
+# Large fetched data, all regenerable
+data/players_nfl.json
+data/projections_*.json
+data/stats_*.json
+data/schedule_raw/
+data/statking.db
+data/statking.db-wal
+data/statking.db-shm
+data/nfl.duckdb
+data/nfl.duckdb.wal
+
+# Learned DOM profiles are personal to your platform and league layout.
+# Keep the directory, not the contents.
+engine/platforms/profiles/*.json
+
+# Runtime output
+logs/*
+!logs/.gitkeep
+*.png
+
+# Python
+__pycache__/
+*.pyc
+.venv/
