@@ -17,6 +17,7 @@ data/nfl.duckdb.wal
 # Learned DOM profiles are personal to your platform and league layout.
 # Keep the directory, not the contents.
 engine/platforms/profiles/*.json
+!engine/platforms/profiles/sleeper.json
 
 # Runtime output
 logs/*

@@ -1,0 +1,18 @@
+{
+ "_shipped": "Sleeper's mapping ships with the project - it was written by hand against the live app and is what engine/explore.py was validated against. Yours will be learned instead.",
+ "bench_slot_labels": [
+  "BN",
+  "IR"
+ ],
+ "confirm_add": ".modal-item-underlay .form-elements.button",
+ "drop_row": ".modal-item-underlay .team-roster-item",
+ "player_add": ".player-action-button.add",
+ "player_row": ".player-list-item",
+ "player_search": ".player-search input",
+ "players_url": "https://sleeper.com/leagues/{league_id}/players",
+ "roster_row": ".team-roster-item",
+ "row_name": ".player-name",
+ "row_slot": ".league-slot-position-square",
+ "row_slot_click": ".league-slot-position-square",
+ "team_url": "https://sleeper.com/leagues/{league_id}/team"
+}
