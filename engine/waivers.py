@@ -38,9 +38,14 @@ MAX_SINGLE_BID_SHARE = 0.60
 
 
 def rostered_pids(cfg):
-    """Every player owned by anyone in the league, straight from Sleeper."""
+    """Every player owned by anyone in the league, straight from Sleeper.
+
+    Read uncached. A stale roster here is not a cosmetic problem: it made a
+    player we had just dropped look like he was still ours, which stopped an
+    attempt to take him back.
+    """
     out = set()
-    for r in (SY.get(f"{SY.API}/league/{cfg['league_id']}/rosters") or []):
+    for r in (SY.get(f"{SY.API}/league/{cfg['league_id']}/rosters", fresh=True) or []):
         for pid in (r.get("players") or []):
             out.add(pid)
     return out

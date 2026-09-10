@@ -13,9 +13,20 @@ UA = {"User-Agent": "Mozilla/5.0 (statking)"}
 API = "https://api.sleeper.app/v1"
 
 
-def get(url):
+def get(url, fresh=False):
+    """Fetch JSON from Sleeper.
+
+    `fresh=True` asks the CDN not to serve a cached copy. That matters more
+    than it sounds: the `/rosters` endpoint served a stale roster for over five
+    minutes after a completed transaction, which made a just-dropped player look
+    like he was still ours and a just-added one look absent. A decision made on
+    that view is a decision made on the past.
+    """
+    headers = dict(UA)
+    if fresh:
+        headers.update({"Cache-Control": "no-cache", "Pragma": "no-cache"})
     try:
-        req = urllib.request.Request(url, headers=UA)
+        req = urllib.request.Request(url, headers=headers)
         with urllib.request.urlopen(req, timeout=20) as r:
             return json.loads(r.read().decode())
     except Exception as e:

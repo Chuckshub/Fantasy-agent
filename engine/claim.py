@@ -47,6 +47,18 @@ DIALOG_SETTLE_SEC = 1.4
 VERIFY_TIMEOUT_SEC = 30
 VERIFY_POLL_SEC = 2.5
 
+# What an unfilled starter slot actually costs, by position, in points.
+# Kickers and defences are streamable on any given week - there is always a
+# startable one on waivers - so an empty K slot costs about what a replacement
+# streamer scores, not infinity. The skill positions are not streamable at
+# short notice, so their holes stay effectively prohibitive.
+HOLE_COST = {"K": 7.0, "DEF": 7.0, "TE": 25.0, "_default": 40.0}
+
+# A cross-position drop of a load-bearing player needs to clear this before
+# it is even considered. Set high on purpose: the two moves it exists to
+# prevent scored +11 and -12, and both were wrong.
+BIG_GAIN = 30.0
+
 # How far ahead the drop guard looks for byes. A player who is the only startable
 # body at his position in week 7 must not be dropped in week 3 for a marginal
 # upgrade, which is exactly the trap a greedy weekly comparison walks into.
@@ -388,7 +400,7 @@ def score_week(roster, cfg, week, season):
     return sum(p["proj"] for p in lineup), (unfilled or {})
 
 
-def best_drop_for(cfg, roster, incoming, weeks, season="2026"):
+def best_drop_for(cfg, roster, incoming, weeks, season="2026", min_gain=0.0):
     """Which player to drop for `incoming`, decided by simulating the result.
 
     Every heuristic tried before this one picked a player who should obviously
@@ -408,23 +420,65 @@ def best_drop_for(cfg, roster, incoming, weeks, season="2026"):
     surprisingly often and is always better than making a move for its own sake.
     """
     base = {w: score_week(roster, cfg, w, season) for w in weeks}
+    depth = position_depth(cfg)
+    by_pos = {}
+    for p in roster:
+        by_pos.setdefault(p["pos"], []).append(p)
+    for pos in by_pos:
+        by_pos[pos].sort(key=lambda x: -(x.get("proj") or 0))
+    rank_of = {p["pid"]: i + 1
+               for pos, ps in by_pos.items() for i, p in enumerate(ps)}
+
+    def protected(p):
+        """Is this player load-bearing at his position?
+
+        A blunt backstop, added after the scoring model talked itself into
+        dropping two starting receivers for a kicker and a defence. Anyone
+        inside his position's startable depth is off limits unless the incoming
+        player plays the same position - which is what an actual upgrade looks
+        like - or the gain is so large it is not a marginal call.
+        """
+        return rank_of.get(p["pid"], 99) <= depth.get(p["pos"], 1)
+
     best = None
     for cand in roster:
+        same_pos = cand["pos"] == incoming.get("pos")
         trial = [p for p in roster if p["pid"] != cand["pid"]] + [incoming]
-        gain, opens_hole = 0.0, False
+        gain, holes = 0.0, []
         per_week = {}
         for w in weeks:
             pts, unf = score_week(trial, cfg, w, season)
             b_pts, b_unf = base[w]
             gain += pts - b_pts
             per_week[w] = round(pts - b_pts, 2)
-            if sum(unf.values()) > sum(b_unf.values()):
-                opens_hole = True
-                break
-        if opens_hole:
+            for pos, n in (unf or {}).items():
+                extra = n - (b_unf or {}).get(pos, 0)
+                if extra > 0:
+                    holes.append((w, pos, extra))
+        # A new hole used to veto the move outright, and that rigidity cost a
+        # real player. Swapping one kicker for a better one scored best of every
+        # option, and was thrown out because the incoming kicker's bye left week
+        # 13 empty - a gap you close by streaming a kicker for one week. The
+        # algorithm fell to its second choice instead and dropped a starting
+        # receiver, who was claimed by another manager within five minutes.
+        #
+        # So a hole is priced rather than forbidden. Kicker and defence holes
+        # cost roughly what a replacement-level streamer returns, because that
+        # is exactly how they get filled. Holes at positions you cannot stream
+        # on demand stay effectively prohibitive.
+        cost = sum(HOLE_COST.get(pos, HOLE_COST["_default"]) * extra
+                   for _, pos, extra in holes)
+        gain -= cost
+        if protected(cand) and not same_pos and gain < BIG_GAIN:
             continue
         if best is None or gain > best["gain"]:
-            best = {**cand, "gain": round(gain, 2), "per_week": per_week}
+            best = {**cand, "gain": round(gain, 2), "per_week": per_week,
+                    "holes": holes, "hole_cost": round(cost, 2)}
+    # Never return a drop that makes the roster worse. Without this the caller
+    # happily executed the least-bad option even when every option was bad: the
+    # attempt to add a defence resolved to a drop scoring -11.9 and tried it.
+    if best is not None and best["gain"] <= min_gain:
+        return None
     return best
 
 
@@ -513,9 +567,29 @@ def inspect(name, port=cdp.DEFAULT_PORT):
         pp.close()
 
 
-def roster_pids(cfg):
-    rosters = SY.get(f"{SY.API}/league/{cfg['league_id']}/rosters") or []
-    for r in rosters:
+def our_roster_id(cfg):
+    for r in (SY.get(f"{SY.API}/league/{cfg['league_id']}/rosters", fresh=True) or []):
+        if str(r.get("owner_id")) == str(cfg.get("user_id")):
+            return r.get("roster_id")
+    return None
+
+
+def roster_pids(cfg, week=None):
+    """Our current player ids.
+
+    Read from the matchups feed rather than /rosters. Both describe the same
+    roster, but /rosters is CDN-cached and served a five-minute-stale view
+    immediately after a completed transaction - showing a player we had just
+    dropped as still ours, and the one we had just added as absent. Verifying a
+    write against a cached read is not verification.
+    """
+    rid = our_roster_id(cfg)
+    if rid is not None and week:
+        for m in (SY.get(f"{SY.API}/league/{cfg['league_id']}/matchups/{week}",
+                         fresh=True) or []):
+            if m.get("roster_id") == rid:
+                return {str(x) for x in (m.get("players") or [])}
+    for r in (SY.get(f"{SY.API}/league/{cfg['league_id']}/rosters", fresh=True) or []):
         if str(r.get("owner_id")) == str(cfg.get("user_id")):
             return {str(x) for x in (r.get("players") or [])}
     return set()
@@ -530,12 +604,20 @@ def verify_claim(cfg, add_pid, drop_pid, week, timeout=VERIFY_TIMEOUT_SEC):
     never pass is neither.
     """
     deadline = time.time() + timeout
+    our_rid = our_roster_id(cfg)
     while time.time() < deadline:
-        pids = roster_pids(cfg)
+        pids = roster_pids(cfg, week)
         if str(add_pid) in pids and (not drop_pid or str(drop_pid) not in pids):
             return True, "confirmed: the roster now holds the added player"
-        for t in (SY.get(f"{SY.API}/league/{cfg['league_id']}/transactions/{week}") or []):
+        for t in (SY.get(f"{SY.API}/league/{cfg['league_id']}/transactions/{week}",
+                         fresh=True) or []):
             adds = t.get("adds") or {}
+            # The transaction has to be OURS. Matching on player id alone meant
+            # another manager adding the same free agent would read back as our
+            # success - a false confirmation, which is worse than none, because
+            # nothing downstream ever re-checks a confirmed write.
+            if our_rid is not None and str(adds.get(str(add_pid))) != str(our_rid):
+                continue
             if str(add_pid) in {str(k) for k in adds}:
                 return True, (f"confirmed: a {t.get('type')} transaction is "
                               f"{t.get('status')} for this player")
