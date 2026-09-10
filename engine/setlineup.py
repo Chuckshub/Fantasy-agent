@@ -357,6 +357,47 @@ def plan_swaps(rows, by_row, res, kicks, cfg, min_gain=MIN_APPLY_GAIN):
                                x["proj"]))
 
     plan, skipped, used = [], [], set()
+
+    # An EMPTY starter slot has to be filled before anything is swapped, and it
+    # is a different operation. Every pairing below matches a promotion to a
+    # player being demoted, which silently does nothing when the slot has no
+    # occupant - so after an add/drop leaves the kicker, defence and one flex
+    # empty, the optimiser reported the right lineup and then refused every
+    # move with "no starter he can legally replace". Three slots scoring zero,
+    # and the module whose entire job is to prevent that could not see it.
+    empty_slots = [r for r in rows
+                   if r.get("empty")
+                   and slot_token(r) not in BENCH_SLOTS
+                   and slot_token(r) != "IR"]
+    # Most constrained first, for the same reason as the swap pass.
+    empty_slots.sort(key=lambda r: slot_token(r) in ("FLEX", "SUPERFLEX"))
+    for slot_row in empty_slots:
+        slot = slot_token(slot_row)
+        eligible = [p for p in promote
+                    if p["pid"] not in used and can_fill(p["pos"], slot, cfg)]
+        if not eligible:
+            skipped.append({"start": None, "sit": None,
+                            "why": f"the {slot} slot is empty and nobody on the "
+                                   f"bench can fill it"})
+            continue
+        up = eligible[0]
+        locked, why = is_locked(up, kicks)
+        if locked:
+            skipped.append({"start": up, "sit": None,
+                            "why": f"{up['name']} is locked ({why})"})
+            continue
+        if up["pid"] not in row_of:
+            continue
+        used.add(up["pid"])
+        plan.append({
+            "start": up, "sit": None, "slot": slot,
+            "start_row": row_of[up["pid"]], "sit_row": slot_row["i"],
+            # Filling an empty slot gains the player's whole projection: the
+            # slot was scoring zero. No threshold applies - leaving a starter
+            # slot empty is never defensible.
+            "gain": round(up["proj"], 2), "forced": True, "fill": True,
+        })
+
     for down in demote:
         slot = slot_of.get(down["pid"])
         eligible = [p for p in promote
@@ -406,15 +447,54 @@ def plan_swaps(rows, by_row, res, kicks, cfg, min_gain=MIN_APPLY_GAIN):
 
 
 # ------------------------------------------------------------------ applying
+def _row_for_player(rows, player):
+    """Find a player's current row by name, not by a remembered index."""
+    want = last_name(player.get("name"))
+    for r in rows:
+        if r.get("name") and last_name(r["name"]) == want:
+            return r
+    # Defenses render as a bare team code rather than a person's name.
+    if player.get("pos") == "DEF" and player.get("team"):
+        for r in rows:
+            if r.get("name") and norm(r["name"]) == norm(player["team"]):
+                return r
+    return None
+
+
+def _empty_slot_row(rows, slot):
+    for r in rows:
+        if r.get("empty") and slot_token(r) == slot:
+            return r
+    return None
+
+
 def apply_swap(tp, step):
-    """Click the two squares and confirm in the DOM that they actually swapped."""
+    """Click the two squares and confirm in the DOM that they actually swapped.
+
+    Rows are re-resolved here by player and slot rather than by the index the
+    plan recorded. React renumbers the list after every move, so the second
+    step of a multi-step plan was addressing rows that had shifted underneath
+    it - the kicker landed and the defence then clicked an index that no longer
+    held anything, reporting a failure that was really a stale pointer.
+    """
     rows = tp.rows()
+    src = _row_for_player(rows, step["start"])
+    if src is None:
+        return False, {"why": f"{step['start']['name']} is no longer on the page"}
+    if step.get("fill"):
+        dst = _empty_slot_row(rows, step["slot"])
+        if dst is None:
+            return False, {"why": f"the {step['slot']} slot is no longer empty"}
+    else:
+        dst = _row_for_player(rows, step["sit"])
+        if dst is None:
+            return False, {"why": f"{step['sit']['name']} is no longer on the page"}
     by_i = {r["i"]: r for r in rows}
-    a, b = step["start_row"], step["sit_row"]
-    a_name = (by_i.get(a) or {}).get("name")
-    b_name = (by_i.get(b) or {}).get("name")
-    a_slot = (by_i.get(a) or {}).get("slot")
-    b_slot = (by_i.get(b) or {}).get("slot")
+    a, b = src["i"], dst["i"]
+    a_name = src.get("name")
+    b_name = dst.get("name")
+    a_slot = src.get("slot")
+    b_slot = dst.get("slot")
 
     tp.click(a, expect_name=a_name, expect_slot=a_slot)
     time.sleep(SETTLE_SEC)
@@ -424,6 +504,15 @@ def apply_swap(tp, step):
     after = {r["i"]: r for r in tp.rows()}
     now_a = (after.get(a) or {}).get("slot")
     now_b = (after.get(b) or {}).get("slot")
+    if step.get("fill"):
+        # Filling an empty slot has no second player, so "did they trade
+        # places" is the wrong question. The only thing that matters is that
+        # the promoted player now occupies a starting slot.
+        landed = {r.get("name"): slot_token(r) for r in after.values() if r.get("name")}
+        got = landed.get(a_name)
+        ok = got is not None and got not in BENCH_SLOTS
+        return ok, {"start": a_name, "sit": None, "start_slot_now": got,
+                    "filled": step.get("slot")}
     # The bench row should now hold a starting slot and vice versa. Sleeper may
     # also reorder rows entirely; falling back to "where did each name land"
     # keeps the check honest either way.
@@ -489,8 +578,12 @@ def run(week=None, season="2026", mode="check", port=cdp.DEFAULT_PORT,
             if not plan and not skipped:
                 print("  lineup already matches the target - nothing to change.")
             for s in plan:
-                print(f"  SWAP   start {s['start']['name']:<22}"
-                      f"sit {s['sit']['name']:<22}{s['gain']:+.1f}")
+                if s.get("fill"):
+                    print(f"  FILL   start {s['start']['name']:<22}"
+                          f"into empty {s['slot']:<12}{s['gain']:+.1f}")
+                else:
+                    print(f"  SWAP   start {s['start']['name']:<22}"
+                          f"sit {s['sit']['name']:<22}{s['gain']:+.1f}")
             for s in skipped:
                 # Either side can be absent: a starter nobody can legally
                 # replace has no `start`, and a bench player with no starter to
@@ -509,7 +602,9 @@ def run(week=None, season="2026", mode="check", port=cdp.DEFAULT_PORT,
         applied, failed = [], []
         for step in plan:
             ok, detail = apply_swap(tp, step)
-            line = (f"start {step['start']['name']} / sit {step['sit']['name']} "
+            what = (f"into empty {step['slot']}" if step.get("fill")
+                    else f"/ sit {step['sit']['name']}")
+            line = (f"start {step['start']['name']} {what} "
                     f"({step['gain']:+.1f}) -> {'ok' if ok else 'FAILED'} {detail}")
             log(line)
             if verbose:
@@ -523,7 +618,8 @@ def run(week=None, season="2026", mode="check", port=cdp.DEFAULT_PORT,
         ok, why = verify_against_api(
             cfg,
             [s["start"]["pid"] for s in applied],
-            [s["sit"]["pid"] for s in applied]) if applied else (True, "nothing to verify")
+            [s["sit"]["pid"] for s in applied if s.get("sit")]) \
+            if applied else (True, "nothing to verify")
         log(f"verify: {ok} - {why}")
         if verbose:
             print(f"\n  VERIFY {'ok' if ok else 'FAILED'}: {why}")
