@@ -390,10 +390,10 @@ def protected_pids(cfg, week, season="2026", lookahead=LOOKAHEAD_WEEKS):
     return why, roster, res
 
 
-def score_week(roster, cfg, week, season):
+def score_week(roster, cfg, week, season, current_week=None):
     """(points, unfilled) for the best legal lineup this roster can field."""
     import value_trade as VT
-    eff = LU.effective(roster, week, cfg, season)
+    eff = LU.effective(roster, week, cfg, season, current_week=current_week)
     playable = [p for p in eff if p["mult"] > 0]
     lineup, _, unfilled = VT.optimal_lineup(
         playable, cfg["roster_slots"], set(cfg["flex_eligible"]))

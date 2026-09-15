@@ -95,7 +95,8 @@ def holes(cfg, roster, start_week, season="2026", horizon=HORIZON):
     span = max(0, min(horizon, end - start_week + 1))
     if span <= 0:
         return out
-    rows = LU.forecast(roster, cfg, span, season, start_week=start_week)
+    rows = LU.forecast(roster, cfg, span, season, start_week=start_week,
+                       current_week=start_week)
     for r in rows:
         if r["unfilled"]:
             out.append({"week": r["week"], "short": dict(r["unfilled"]),
@@ -133,7 +134,7 @@ def candidates(cfg, pos, week, roster, season="2026", top_n=TOP_N, board=None):
     # there is no weekly projection for a week 7, and effective() falls back to
     # a per-game share of the season projection - which is the right ordering
     # for "who is the best body available", even if the absolute number is soft.
-    eff = LU.effective(pool[:80], week, cfg, season)
+    eff = LU.effective(pool[:80], week, cfg, season, current_week=week)
     eff.sort(key=lambda x: -(x.get("proj") or 0))
     return eff[:top_n]
 

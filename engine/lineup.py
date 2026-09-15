@@ -41,6 +41,12 @@ STATUS_MULT = {"Doubtful": 0.25, "Questionable": 0.90, "Limited": 0.95}
 
 SCORING_KEY = {"ppr": "pts_ppr", "half_ppr": "pts_half_ppr", "std": "pts_std"}
 
+# How many weeks ahead a current injury designation is allowed to apply.
+# One: this week and next. Beyond that a designation is not evidence about
+# the week being asked about, and treating it as such re-opens bye holes that
+# were already paid to close.
+INJURY_HORIZON = 1
+
 
 def get(url):
     try:
@@ -81,8 +87,25 @@ def injury_status(pid):
     return (_PLAYERS.get(pid) or {}).get("injury_status")
 
 
-def playability(p, week, wkrow, byes, opponents):
-    """(multiplier, reason). 0.0 means this player cannot be started this week."""
+def playability(p, week, wkrow, byes, opponents, current_week=None):
+    """(multiplier, reason). 0.0 means this player cannot be started this week.
+
+    Byes are facts about a specific week and apply whenever they are asked
+    about. **Injury designations are not.** A player listed Out today is a fact
+    about today; carrying that into week 13 asserts he is injured for three
+    months, which no designation means.
+
+    That distinction was missing and it mattered immediately. A running back
+    acquired to cover the week 6 and week 8 byes was listed Out with a knee in
+    week 2, and the forward-looking planner promptly reported him unavailable in
+    weeks 5, 6, 7, 8, 11 and 13 - re-opening the very holes he had been bought
+    to close, and inviting another round of waiver moves to fix a problem that
+    did not exist.
+
+    So the designation is applied only inside `INJURY_HORIZON` weeks of the
+    current one. Past that the season projection already prices expected missed
+    games, and a designation adds nothing but false precision.
+    """
     team = p.get("team")
     if team and byes.get(team) == week:
         return 0.0, f"BYE (week {week})"
@@ -90,6 +113,8 @@ def playability(p, week, wkrow, byes, opponents):
         return 0.0, f"BYE (no game week {week})"
     if wkrow is not None and wkrow.get("opponent") is None:
         return 0.0, "no opponent listed (bye or not on a roster)"
+    if current_week is not None and week - current_week > INJURY_HORIZON:
+        return 1.0, ""
     st = injury_status(p["pid"])
     if st in OUT_STATUSES:
         return 0.0, f"OUT ({st})"
@@ -132,7 +157,7 @@ def week_points(stats, cfg, pos, key):
 
 
 def effective(roster, week, cfg, season="2026", apply_matchup=False,
-              dvp_season="2025"):
+              dvp_season="2025", current_week=None):
     """Roster copies whose `proj` is this week's effective points."""
     byes, opponents = load_byes()
     ck = (season, week)
@@ -151,7 +176,7 @@ def effective(roster, week, cfg, season="2026", apply_matchup=False,
         row = wk.get(p["pid"])
         stats = (row or {}).get("stats") or {}
         raw = week_points(stats, cfg, p["pos"], key)
-        mult, reason = playability(p, week, row, byes, opponents)
+        mult, reason = playability(p, week, row, byes, opponents, current_week)
         q = dict(p)
         q["week_raw"] = raw
         q["mult"] = mult
@@ -225,11 +250,11 @@ def analyse(roster, cfg, week, current_starters=None, season="2026",
             "unavailable": unavailable, "problems": problems, "swaps": swaps}
 
 
-def forecast(roster, cfg, weeks, season="2026", start_week=1):
+def forecast(roster, cfg, weeks, season="2026", start_week=1, current_week=None):
     """Weeks where byes or injuries leave us unable to field a full lineup."""
     rows = []
     for wk in range(start_week, start_week + weeks):
-        eff = effective(roster, wk, cfg, season)
+        eff = effective(roster, wk, cfg, season, current_week=current_week)
         playable = [p for p in eff if p["mult"] > 0]
         lineup, bench, unfilled = VT.optimal_lineup(
             playable, cfg["roster_slots"], set(cfg["flex_eligible"]))
