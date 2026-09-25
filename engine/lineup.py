@@ -35,6 +35,15 @@ _WK_CACHE, _DVP_CACHE = {}, {}
 
 # Cannot play. Sleeper uses short codes; NA is "not active" (roster exempt).
 OUT_STATUSES = {"Out", "IR", "PUP", "NA", "Sus", "DNR", "COV", "DNP"}
+
+# Of those, the ones that are a statement about MULTIPLE weeks rather than this
+# one. The distinction matters in both directions. Projecting a one-week "Out"
+# into November invented six phantom bye holes and nearly triggered a round of
+# waiver moves to fix them. But refusing to project anything forward is equally
+# wrong: a player placed on injured reserve is not available next month either,
+# and planning as though he is leaves a real hole unclosed. So short-term
+# designations expire at the horizon and long-term ones do not.
+LONG_TERM_STATUSES = {"IR", "PUP", "NA", "Sus", "DNR"}
 # Can play, but discounted. These multipliers are deliberately blunt - the point
 # is to break ties toward the healthy player, not to model probability of play.
 STATUS_MULT = {"Doubtful": 0.25, "Questionable": 0.90, "Limited": 0.95}
@@ -113,9 +122,11 @@ def playability(p, week, wkrow, byes, opponents, current_week=None):
         return 0.0, f"BYE (no game week {week})"
     if wkrow is not None and wkrow.get("opponent") is None:
         return 0.0, "no opponent listed (bye or not on a roster)"
-    if current_week is not None and week - current_week > INJURY_HORIZON:
-        return 1.0, ""
     st = injury_status(p["pid"])
+    beyond = (current_week is not None
+              and week - current_week > INJURY_HORIZON)
+    if beyond and st not in LONG_TERM_STATUSES:
+        return 1.0, ""
     if st in OUT_STATUSES:
         return 0.0, f"OUT ({st})"
     if st in STATUS_MULT:

@@ -468,6 +468,62 @@ def _empty_slot_row(rows, slot):
     return None
 
 
+def stash_on_ir(tp, roster, verbose=True):
+    """Move players carrying a long-term designation into the IR slot.
+
+    Sleeper gives the roster an IR slot that does not count against the bench,
+    so a player on injured reserve sitting on the bench is a wasted roster spot
+    for as long as he is out - and unlike a drop it costs nothing to correct,
+    because he stays ours and can be activated when he returns.
+
+    The league config said `reserve_slots: 0`, which is why nothing looked for
+    this slot before. The config was written from a pre-draft sync; the live
+    team page has one.
+
+    Only long-term designations qualify. Parking a player who is merely
+    Questionable would make him unstartable for a week he could well play.
+    """
+    rows = tp.rows()
+    ir_row = next((r for r in rows
+                   if r.get("empty") and slot_token(r) == "IR"), None)
+    if ir_row is None:
+        return []
+    by_name = {}
+    for p in roster:
+        by_name[last_name(p.get("name"))] = p
+    moved = []
+    for r in rows:
+        if not r.get("name") or slot_token(r) != "BN":
+            continue
+        p = by_name.get(last_name(r["name"]))
+        if not p:
+            continue
+        st = LU.injury_status(p["pid"])
+        if st not in LU.LONG_TERM_STATUSES:
+            continue
+        tp.click(r["i"], expect_name=r.get("name"), expect_slot=r.get("slot"))
+        time.sleep(SETTLE_SEC)
+        after = tp.rows()
+        ir_now = next((x for x in after
+                       if x.get("empty") and slot_token(x) == "IR"), None)
+        if ir_now is None:
+            log(f"IR: slot filled or unavailable while moving {r['name']}")
+            break
+        tp.click(ir_now["i"], expect_name=None, expect_slot=ir_now.get("slot"))
+        time.sleep(SETTLE_SEC)
+        landed = {x.get("name"): slot_token(x) for x in tp.rows() if x.get("name")}
+        if landed.get(r["name"]) == "IR":
+            moved.append({"name": r["name"], "status": st})
+            if verbose:
+                print(f"  IR     {r['name']} ({st}) moved to injured reserve "
+                      f"- bench spot freed")
+            log(f"IR: {r['name']} ({st}) -> IR slot")
+        else:
+            log(f"IR: {r['name']} did not land on IR (now {landed.get(r['name'])})")
+        break                      # one per run; the slot is single
+    return moved
+
+
 def apply_swap(tp, step):
     """Click the two squares and confirm in the DOM that they actually swapped.
 

@@ -421,8 +421,33 @@ def best_drop_for(cfg, roster, incoming, weeks, season="2026", min_gain=0.0):
     """
     base = {w: score_week(roster, cfg, w, season) for w in weeks}
     depth = position_depth(cfg)
+    # A player who cannot play is not depth. Ranking by season projection alone
+    # treated a running back on injured reserve as the roster's fourth-best RB
+    # and therefore load-bearing, which blocked the one drop that improved the
+    # roster - swapping a man who cannot take the field for a defence that
+    # closes a bye-week hole. Long-term unavailability is excluded from the
+    # ranking entirely, so the players behind him move up and he protects
+    # nothing.
+    # Players stashed on injured reserve are excluded from the drop search
+    # entirely, and the reason is easy to get wrong in both directions.
+    #
+    # First attempt: they ranked by season projection like everyone else, so a
+    # running back on IR counted as the roster's fourth-best RB and was
+    # "protected" from being dropped - blocking a move that looked correct.
+    # Second attempt made them droppable, and the add dialog then refused the
+    # claim because an IR player is not on the active roster at all: Sleeper
+    # would not list him as a drop option.
+    #
+    # Which is the real point. The IR slot does not count against the active
+    # roster, so dropping the player occupying it frees no space and cannot
+    # make room for anyone. He is neither depth nor a drop candidate.
+    on_ir = {p["pid"] for p in roster
+             if LU.injury_status(p["pid"]) in LU.LONG_TERM_STATUSES}
+    unavailable = on_ir
     by_pos = {}
     for p in roster:
+        if p["pid"] in on_ir:
+            continue
         by_pos.setdefault(p["pos"], []).append(p)
     for pos in by_pos:
         by_pos[pos].sort(key=lambda x: -(x.get("proj") or 0))
@@ -438,10 +463,14 @@ def best_drop_for(cfg, roster, incoming, weeks, season="2026", min_gain=0.0):
         player plays the same position - which is what an actual upgrade looks
         like - or the gain is so large it is not a marginal call.
         """
+        if p["pid"] in unavailable:
+            return False
         return rank_of.get(p["pid"], 99) <= depth.get(p["pos"], 1)
 
     best = None
     for cand in roster:
+        if cand["pid"] in on_ir:
+            continue           # frees no active spot; Sleeper will not offer him
         same_pos = cand["pos"] == incoming.get("pos")
         trial = [p for p in roster if p["pid"] != cand["pid"]] + [incoming]
         gain, holes = 0.0, []
