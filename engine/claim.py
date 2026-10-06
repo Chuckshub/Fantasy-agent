@@ -263,40 +263,26 @@ JS_SET_BID = r"""
 # The commit. Deliberately matched on the exact button, and it refuses to click
 # anything whose text is not the add/claim action - a stray match on "Cancel"
 # would be harmless but a stray match on some other confirm would not.
-JS_SUBMIT = r"""
+JS_SUBMIT_RECT = r"""
 (() => {
   const root = document.querySelector('.modal-item-underlay');
   if (!root) return JSON.stringify({ok:false, why:'dialog is gone'});
-  const btns = [...root.querySelectorAll('button,[class*="button"],[class*="btn"]')]
-               .filter(b => b.offsetParent !== null);
-  // Sleeper labels the commit differently for a free agent and a waiver:
-  // "ADD PLAYER" versus "MAKE WAIVER CLAIM". Matching only the first meant
-  // every waiver dialog opened correctly, selected the drop correctly, and
-  // then failed with "no add/claim button" - so no claim was ever submitted
-  // in the window where the good players actually are.
   const want = /^(add player|make waiver claim|claim player|place claim|submit claim|add|claim)$/i;
-  const hits = btns.filter(b => want.test((b.innerText || '').trim()));
-  if (!hits.length)
-    return JSON.stringify({ok:false, why:'no add/claim button',
-                           saw: btns.map(b => (b.innerText||'').trim()).slice(0,10)});
-  // Take the OUTERMOST match that actually carries a class. Sleeper nests a
-  // bare unstyled span inside the real button, and picking the innermost
-  // element clicked that span - which has no handler, so the dialog stayed
-  // open and the claim was never submitted. The click reported success and
-  // nothing happened, which is the worst combination available.
-  const real = hits.filter(b => String(b.className || '').trim().length > 0);
-  const btn = (real.length ? real : hits)[0];
-  if (/disabled/i.test(String(btn.className || '')) || btn.disabled)
-    return JSON.stringify({ok:false, why:'the submit button is disabled'});
-  const r = btn.getBoundingClientRect();
-  const at = {bubbles:true, cancelable:true, view:window,
-              clientX: r.left + r.width/2, clientY: r.top + r.height/2};
-  for (const t of ['pointerdown','mousedown','pointerup','mouseup','click'])
-    btn.dispatchEvent(new MouseEvent(t, at));
-  return JSON.stringify({ok:true, clicked:(btn.innerText||'').trim(),
-                         cls:String(btn.className||'')});
+  const btns = [...root.querySelectorAll('button,[class*="button"],[class*="btn"]')]
+    .filter(b => b.offsetParent !== null && want.test((b.innerText||'').trim())
+                 && String(b.className||'').trim());
+  if (!btns.length)
+    return JSON.stringify({ok:false, why:'no add/claim button'});
+  const b = btns[0];
+  if (b.disabled || /disabled/i.test(String(b.className||'')))
+    return JSON.stringify({ok:false, why:'submit button is disabled'});
+  const r = b.getBoundingClientRect();
+  return JSON.stringify({ok:true, label:(b.innerText||'').trim(),
+                         x: Math.round(r.left + r.width/2),
+                         y: Math.round(r.top + r.height/2)});
 })()
 """
+
 
 JS_CLOSE_DIALOG = r"""
 (() => {
@@ -360,8 +346,36 @@ class PlayersPage:
     def set_bid(self, amount):
         return self.page.evaluate(JS_SET_BID % json.dumps(int(amount)))
 
+    def click_at(self, x, y):
+        """A real mouse click, dispatched by the browser rather than by script.
+
+        This is the difference between a waiver claim landing and silently
+        doing nothing. Synthetic MouseEvents are enough for Sleeper's lineup
+        squares and its add-player button, but the waiver commit ignores them -
+        React can tell an untrusted event from a real one, and for this action
+        it checks. Four fixes went into the claim chain before this, and the
+        submit still reported success while the dialog sat there unchanged.
+        """
+        for ev in ("mousePressed", "mouseReleased"):
+            self.page.call("Input.dispatchMouseEvent", {
+                "type": ev, "x": int(x), "y": int(y),
+                "button": "left", "clickCount": 1})
+            time.sleep(0.12)
+
     def submit(self):
-        return self.page.evaluate(JS_SUBMIT)
+        """Commit the add or the waiver claim, with a trusted click."""
+        r = self.page.evaluate(JS_SUBMIT_RECT)
+        if not (isinstance(r, dict) and r.get("ok")):
+            return {"ok": False, "why": (r or {}).get("why", "no submit button")}
+        self.click_at(r["x"], r["y"])
+        time.sleep(1.5)
+        still = self.page.evaluate(
+            "JSON.stringify(!!document.querySelector('.modal-item-underlay'))")
+        # The dialog closing is the platform accepting it. A pending waiver
+        # claim shows up nowhere else until it processes, so this is the only
+        # immediate signal there is.
+        return {"ok": still is not True, "clicked": r.get("label"),
+                "dialog_closed": still is not True}
 
     def close_dialog(self):
         try:
@@ -656,7 +670,8 @@ def roster_pids(cfg, week=None):
     return set()
 
 
-def verify_claim(cfg, add_pid, drop_pid, week, timeout=VERIFY_TIMEOUT_SEC):
+def verify_claim(cfg, add_pid, drop_pid, week, timeout=VERIFY_TIMEOUT_SEC,
+                 pending_ok=False):
     """Confirm with Sleeper. The roster endpoint is the truth, not the page.
 
     A waiver claim does not take effect immediately - it is queued until the
@@ -683,6 +698,15 @@ def verify_claim(cfg, add_pid, drop_pid, week, timeout=VERIFY_TIMEOUT_SEC):
                 return True, (f"confirmed: a {t.get('type')} transaction is "
                               f"{t.get('status')} for this player")
         time.sleep(VERIFY_POLL_SEC)
+    # A waiver claim does not touch the roster and does not appear in the
+    # transactions feed until the league processes waivers - days later. The
+    # only immediate evidence is that the dialog accepted and closed, which the
+    # caller already checked. Reporting "failed" here for a claim that is
+    # sitting in the queue is a false negative, and it is the reason several
+    # successful claims were reported as failures.
+    if pending_ok:
+        return True, ("submitted - waiver claims sit pending until the league "
+                      "processes them, so nothing shows on the roster yet")
     return False, (f"Sleeper shows neither a roster change nor a transaction "
                    f"for this player after {timeout}s")
 
@@ -736,8 +760,11 @@ def claim_one(pp, cfg, player, drop, bid, week, dry_run=True):
     s = pp.submit()
     if not (isinstance(s, dict) and s.get("ok")):
         return {"ok": False, "stage": "submit", "why": s}
+    is_waiver = "waiver" in str(s.get("clicked") or "").lower()
     ok, why = verify_claim(cfg, player["pid"],
-                           drop["pid"] if (needs_drop and drop) else None, week)
+                           drop["pid"] if (needs_drop and drop) else None, week,
+                           timeout=8 if is_waiver else VERIFY_TIMEOUT_SEC,
+                           pending_ok=is_waiver)
     return {"ok": ok, "add": name,
             "drop": drop["name"] if (needs_drop and drop) else None,
             "verify": why, "bid": bidres}
