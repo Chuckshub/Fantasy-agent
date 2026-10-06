@@ -116,13 +116,21 @@ JS_MATCH_AND_ADD = r"""
     const nameEl = r.querySelector('.name-container .name');
     const posEl  = r.querySelector('.position');
     const injEl  = r.querySelector('.injury-status');
-    const btn    = r.querySelector('.player-action-button.add');
+    // Sleeper renders a different control depending on whether the player is
+    // a free agent or on waivers: `.add` for an instant pickup, `.waiver` for
+    // a claim that processes on the league's waiver day. Only `.add` was ever
+    // matched, so for the whole window after players are dropped - which is
+    // exactly when the best ones are available - every target read as
+    // "no add button - already rostered?" and the agent made no moves at all.
+    const btn    = r.querySelector('.player-action-button.add')
+                || r.querySelector('.player-action-button.waiver');
     const name = nameEl ? nameEl.innerText.trim() : '';
     const meta = posEl ? posEl.innerText.trim() : '';    // "QB - ARI(14)"
     const m = meta.match(/^([A-Z]{1,3})\s*-\s*([A-Z]{2,3})/);
     const rec = { name, pos: m ? m[1] : null, team: m ? m[2] : null,
                   inj: injEl ? injEl.innerText.trim() : '',
-                  addable: !!btn };
+                  addable: !!btn,
+                  via: btn ? (btn.className.indexOf('waiver') >= 0 ? 'waiver' : 'free_agent') : null };
     seen.push(rec);
     const posOk  = !want.pos  || rec.pos === want.pos;
     const teamOk = !want.team || rec.team === want.team;
@@ -137,7 +145,7 @@ JS_MATCH_AND_ADD = r"""
                            matches: hits.map(h => h.rec), rows_seen: seen.slice(0,15)});
   const hit = hits[0];
   if (!hit.btn)
-    return JSON.stringify({ok:false, why:'no add button - already rostered?',
+    return JSON.stringify({ok:false, why:'no add or waiver button - already rostered',
                            match: hit.rec});
   if (!want.click) return JSON.stringify({ok:true, clicked:false, match:hit.rec});
   hit.btn.click();
@@ -204,7 +212,15 @@ JS_SELECT_DROP = r"""
   if (!want.click) return JSON.stringify({ok:true, clicked:false});
   const row = hits[0];
   const before = String(row.className || '');
-  row.click();
+  // A bare .click() toggles the row's styling but Sleeper does not treat it as
+  // a selection - the dialog kept saying "your roster is full, please select a
+  // player to drop" and the submit button did nothing, forever. The same lesson
+  // as the lineup squares: this app listens for a real pointer sequence.
+  const b = row.getBoundingClientRect();
+  const at = {bubbles:true, cancelable:true, view:window,
+              clientX: b.left + b.width/2, clientY: b.top + b.height/2};
+  for (const t of ['pointerdown','mousedown','pointerup','mouseup','click'])
+    row.dispatchEvent(new MouseEvent(t, at));
   return JSON.stringify({ok:true, clicked:true, before,
                          after: String(row.className || '')});
 })()
@@ -253,16 +269,32 @@ JS_SUBMIT = r"""
   if (!root) return JSON.stringify({ok:false, why:'dialog is gone'});
   const btns = [...root.querySelectorAll('button,[class*="button"],[class*="btn"]')]
                .filter(b => b.offsetParent !== null);
-  const want = /^(add player|claim player|place claim|submit claim|add|claim)$/i;
+  // Sleeper labels the commit differently for a free agent and a waiver:
+  // "ADD PLAYER" versus "MAKE WAIVER CLAIM". Matching only the first meant
+  // every waiver dialog opened correctly, selected the drop correctly, and
+  // then failed with "no add/claim button" - so no claim was ever submitted
+  // in the window where the good players actually are.
+  const want = /^(add player|make waiver claim|claim player|place claim|submit claim|add|claim)$/i;
   const hits = btns.filter(b => want.test((b.innerText || '').trim()));
   if (!hits.length)
     return JSON.stringify({ok:false, why:'no add/claim button',
                            saw: btns.map(b => (b.innerText||'').trim()).slice(0,10)});
-  const btn = hits[hits.length - 1];      // innermost matching element
+  // Take the OUTERMOST match that actually carries a class. Sleeper nests a
+  // bare unstyled span inside the real button, and picking the innermost
+  // element clicked that span - which has no handler, so the dialog stayed
+  // open and the claim was never submitted. The click reported success and
+  // nothing happened, which is the worst combination available.
+  const real = hits.filter(b => String(b.className || '').trim().length > 0);
+  const btn = (real.length ? real : hits)[0];
   if (/disabled/i.test(String(btn.className || '')) || btn.disabled)
-    return JSON.stringify({ok:false, why:'the add button is disabled'});
-  btn.click();
-  return JSON.stringify({ok:true, clicked:(btn.innerText||'').trim()});
+    return JSON.stringify({ok:false, why:'the submit button is disabled'});
+  const r = btn.getBoundingClientRect();
+  const at = {bubbles:true, cancelable:true, view:window,
+              clientX: r.left + r.width/2, clientY: r.top + r.height/2};
+  for (const t of ['pointerdown','mousedown','pointerup','mouseup','click'])
+    btn.dispatchEvent(new MouseEvent(t, at));
+  return JSON.stringify({ok:true, clicked:(btn.innerText||'').trim(),
+                         cls:String(btn.className||'')});
 })()
 """
 

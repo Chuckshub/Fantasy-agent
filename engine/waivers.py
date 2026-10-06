@@ -71,12 +71,21 @@ def usage_trend(pid, season, con, last=3):
     snaps = [r["snaps"] for r in rows if r["snaps"] is not None]
     if len(snaps) < 2:
         return None
+    # `pts` can be NULL for a player who appeared but is not scored in our
+    # format, and fmean over a list containing None raises. That single
+    # exception took the whole waiver scan down - `targets()` has no per-player
+    # guard, so one bad row meant the agent logged "waiver scan failed" every
+    # four hours for days and never looked at the wire at all, while three of
+    # our players sat injured. A missing score is a zero, not a crash.
+    pts = [r["pts"] for r in rows[-last:] if r["pts"] is not None]
+    if not pts:
+        return None
     recent = statistics.fmean(snaps[-last:])
     earlier = statistics.fmean(snaps[:-last]) if len(snaps) > last else snaps[0]
     return {"recent_snaps": recent, "earlier_snaps": earlier,
             "delta": recent - earlier,
             "games": len(rows),
-            "recent_ppg": statistics.fmean([r["pts"] for r in rows[-last:]])}
+            "recent_ppg": statistics.fmean(pts)}
 
 
 def beating_projection(pid, season, con, last=3):
@@ -145,7 +154,10 @@ def targets(cfg=None, season=None, top_n=8):
 
     scored = []
     for p in free:
-        b = breakout_score(p["pid"], season, con)
+        try:
+            b = breakout_score(p["pid"], season, con)
+        except Exception:
+            continue          # one unscoreable player must not kill the scan
         if not b:
             continue
         scored.append((b["score"], p, b))

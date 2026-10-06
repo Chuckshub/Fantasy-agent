@@ -176,16 +176,12 @@ def cmd_cycle(force_post=False):
         except Exception as e:
             log(f"  waiver scan failed: {e}")
 
-        us, trades = DA.scan_trades(con, cfg, board)
-        if trades:
-            signature["top_trade"] = trades[0]["our_gain"]
-            deadline = cfg.get("trade_deadline_week")
-            if deadline and week <= deadline:
-                fields.append(("Best trade available", 
-                    f"with **{trades[0]['with']}**: give {', '.join(trades[0]['give'])} "
-                    f"-> get {', '.join(trades[0]['get'])}\n"
-                    f"us `{trades[0]['our_gain']:+.2f}/wk`, them "
-                    f"`{trades[0]['their_gain']:+.2f}/wk`", 0))
+        # The four-hourly cycle used to advertise "best trade available" from
+        # value_trade.py. That ranking is unsound - its top suggestions gave
+        # away the only kicker, the only defence, and both tight ends, scoring
+        # each as a gain - so it no longer posts anything. Trades are found by
+        # engine/trade.py, which simulates both rosters, on its own weekly
+        # schedule.
 
     changed = signature != state.get("last_signature")
     state["last_signature"] = signature
@@ -497,6 +493,136 @@ def cmd_grade():
     log(f"  graded: brier {d['brier']:.4f}, skill {d['skill']:+.4f}")
 
 
+def cmd_trades():
+    """Scan the league for a trade worth proposing, and say so when there is not.
+
+    Runs weekly rather than on demand because trade value appears and vanishes
+    with injuries: a manager who loses a running back on Sunday needs one on
+    Monday, and the surplus that was worthless last week is suddenly worth
+    something. A scan that only runs when someone remembers to ask misses
+    exactly those windows.
+    """
+    import trade as TR
+    cfg, season, week, status = context()
+    log(f"trades: season {season} week {week}")
+    if status != "complete":
+        return
+    TR.CL.SY  # noqa - ensure the module chain is importable before the long run
+    res = TR.find(cfg, verbose=False)
+    offers = res["offers"]
+    if not offers:
+        log("  no trade clears both bars; stayed quiet")
+        return
+    fields = [("Offers worth making", "\n".join(
+        f"**{o['with']}**: give {', '.join(o['give'])} -> get {', '.join(o['get'])}\n"
+        f"us `{o['our_gain']:+.1f}` season pts, them `{o['their_gain']:+.1f}`"
+        for o in offers[:4]), 0),
+        ("How these are judged",
+         "Both rosters are simulated over every remaining week with the real "
+         "lineup engine, counting an unfilled starter slot as the zero it is. "
+         "Anything that opens a hole on either side is discarded, and the other "
+         "manager has to gain too or the offer is just a message that gets "
+         "ignored.", 0)]
+    post([ND.embed(f"TRADE OFFERS - week {week}",
+                   f"{len(offers)} clear both bars",
+                   ND.GREEN, fields,
+                   "sending still needs the trade UI mapped - propose by hand")]
+         if ND else [])
+    log(f"  trades: {len(offers)} viable")
+
+
+def cmd_daily():
+    """One job, once a day: check the lineup, and move players to win.
+
+    This exists because the pieces were all present and nothing tied them
+    together. Over week 4 and 5 the agent held a roster with three injured
+    starters, identified the right replacements every four hours, and acquired
+    nobody - because the waiver scan had been crashing on a null score for days
+    and no scheduled job ever tried to sign anyone. The lineup half worked
+    perfectly throughout, which made the failure invisible in the logs.
+
+    Order matters. Acquire first, then set the lineup, so a player signed today
+    can start today rather than next week.
+    """
+    import depth as DP
+    import claim as CL
+    cfg, season, week, status = context()
+    log(f"daily: season {season} week {week}")
+    if status != "complete":
+        return
+    RF.refresh(season, week, lookback=0, verbose=False)
+    TR.cmd_sync()
+
+    fields, acted, blocked = [], [], []
+
+    # ---- 1. roster maintenance: stash the long-term injured, free the bench
+    try:
+        board, _, _ = build_board(cfg)
+        roster = DP.our_roster(cfg, board)
+        tp = SL.TeamPage(cfg["league_id"])
+        try:
+            moved = SL.stash_on_ir(tp, roster, verbose=False)
+        finally:
+            tp.close()
+        for m in moved:
+            acted.append(f"moved **{m['name']}** ({m['status']}) to IR, bench spot freed")
+    except Exception as e:
+        log(f"  IR stash failed: {e}")
+
+    # ---- 2. acquisitions: close holes and upgrade, acting only on real gains
+    try:
+        plan = DP.build_plan(cfg, week, str(season))
+        res = DP.acquire(cfg, plan, str(season), week, mode="submit", verbose=False)
+        for r in (res.get("acted") or []):
+            acted.append(f"signed **{r['add']}** ({r['pos']}) for week {r['for_week']}, "
+                         f"dropped **{r['drop']}**")
+        for r in (res.get("skipped") or []):
+            why = r.get("why") or r.get("stage") or "refused"
+            if r.get("add"):
+                blocked.append(f"{r['add']}: {why}")
+        if plan["holes"]:
+            fields.append(("Weeks we cannot field a legal lineup", "\n".join(
+                f"week {h['week']}: short {', '.join(f'{k} x{v}' for k, v in h['short'].items())}"
+                for h in plan["holes"][:6]), 0))
+    except Exception as e:
+        log(f"  acquisition failed: {e}")
+        blocked.append(f"acquisition step errored: {type(e).__name__}: {e}")
+
+    # ---- 3. the lineup, last, so today's signings can start today
+    sl = enforce_lineup(week, season)
+    fields.extend(_applied_fields(sl))
+    for s_ in ((sl or {}).get("applied") or []):
+        acted.append(f"started **{s_['start']['name']}**"
+                     + (f", benched **{s_['sit']['name']}**" if s_.get("sit")
+                        else f" into the empty {s_.get('slot')} slot"))
+
+    # ---- 4. what still needs a human, stated precisely
+    try:
+        board, _, _ = build_board(cfg)
+        roster = DP.our_roster(cfg, board)
+        res2 = LU.analyse(roster, cfg, week)
+        unf = res2.get("unfilled") or {}
+        if unf:
+            blocked.append("EMPTY STARTER SLOTS: "
+                           + ", ".join(f"{k} x{v}" for k, v in unf.items())
+                           + " - nobody on the roster can fill them")
+    except Exception:
+        pass
+
+    if acted:
+        fields.insert(0, ("Done automatically", "\n".join(f"- {a}" for a in acted), 0))
+    if blocked:
+        fields.append(("NEEDS YOU - the agent could not do this",
+                       "\n".join(f"- {b}" for b in blocked[:6]), 0))
+    post([ND.embed(f"DAILY - week {week}",
+                   ("nothing needed changing" if not acted and not blocked
+                    else f"{len(acted)} change(s) made"),
+                   ND.RED if blocked else ND.GREEN, fields,
+                   "runs every morning; acquires first, then sets the lineup")]
+         if ND else [])
+    log(f"  daily: {len(acted)} action(s), {len(blocked)} blocked")
+
+
 def cmd_brief():
     """Post the weekly briefing: who is in, who is out, why, and the edge."""
     cfg, season, week, status = context()
@@ -565,6 +691,8 @@ if __name__ == "__main__":
     g.add_argument("--depth", action="store_true")
     g.add_argument("--forecast", action="store_true")
     g.add_argument("--grade", action="store_true")
+    g.add_argument("--trades", action="store_true")
+    g.add_argument("--daily", action="store_true")
     g.add_argument("--status", action="store_true")
     ap.add_argument("--post", action="store_true", help="post even if unchanged")
     a = ap.parse_args()
@@ -583,6 +711,10 @@ if __name__ == "__main__":
             cmd_forecast()
         elif a.grade:
             cmd_grade()
+        elif a.trades:
+            cmd_trades()
+        elif a.daily:
+            cmd_daily()
         else:
             cmd_status()
     except Exception as e:
